@@ -1,0 +1,218 @@
+/**
+ * ESP32 + NRF24L01 Receiver for Sensor Data
+ * Receives and displays data from transmitter
+ */
+
+#include <SPI.h>
+#include <RF24.h>
+
+// ==================== PIN DEFINITIONS ====================
+#define NRF_CE_PIN    4
+#define NRF_CSN_PIN   5
+#define LED_RX        2     // Data received indicator
+#define LED_VALID      15    // Valid data indicator
+
+// ==================== RF CONFIGURATION ====================
+RF24 radio(NRF_CE_PIN, NRF_CSN_PIN);
+const uint64_t pipeIn = 0xE8E8F0F0E1LL;  // Must match transmitter
+
+// ==================== DATA STRUCTURE ====================
+// Must match transmitter structure EXACTLY
+struct PackedSensorData {
+  uint32_t timestamp;      // 4
+  int16_t temperature;     // 2 (scaled *100)
+  uint16_t pressure;       // 2 (scaled hPa)
+  int16_t altitude;        // 2 (scaled *10)
+  int16_t accel[3];        // 6 (scaled *1000)
+  int16_t gyro[3];         // 6 (scaled *100)
+  uint8_t checksum;        // 1
+};
+
+PackedSensorData receivedData;
+
+// Statistics
+struct {
+  unsigned long packetsReceived;
+  unsigned long packetsValid;
+  unsigned long packetsInvalid;
+  unsigned long lastPacketTime;
+  float packetRate;
+} stats = {0, 0, 0, 0, 0.0};
+
+// ==================== FUNCTION PROTOTYPES ====================
+bool initNRF24Receiver();
+uint8_t calculateChecksum(PackedSensorData* d);
+bool verifyChecksum(PackedSensorData* d);
+void printReceivedData();
+void printStats();
+
+// ==================== SETUP ====================
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+  Serial.println(F("\n\n=== ESP32 SENSOR RECEIVER INITIALIZING ==="));
+  
+  // Initialize LEDs
+  pinMode(LED_RX, OUTPUT);
+  pinMode(LED_VALID, OUTPUT);
+  digitalWrite(LED_RX, LOW);
+  digitalWrite(LED_VALID, LOW);
+  
+  // Initialize NRF24
+  if (!initNRF24Receiver()) {
+    Serial.println(F("❌ NRF24L01 initialization FAILED"));
+    while (1) {
+      digitalWrite(LED_VALID, HIGH);
+      delay(200);
+      digitalWrite(LED_VALID, LOW);
+      delay(200);
+    }
+  }
+  
+  Serial.println(F("✅ Receiver ready - waiting for data..."));
+  Serial.println(F("===========================================\n"));
+  
+  // Print header for data display
+  Serial.println(F("Time    Temp  Pressure Altitude  AccX  AccY  AccZ  GyroX GyroY GyroZ"));
+  Serial.println(F("----------------------------------------------------------------------"));
+}
+
+// ==================== MAIN LOOP ====================
+void loop() {
+  static unsigned long lastStatsTime = 0;
+  static unsigned long packetsAtLastStats = 0;
+  
+  if (radio.available()) {
+    digitalWrite(LED_RX, HIGH);  // Signal data received
+    
+    // Read the data
+    radio.read(&receivedData, sizeof(receivedData));
+    stats.packetsReceived++;
+    stats.lastPacketTime = millis();
+    
+    // Verify checksum
+    if (verifyChecksum(&receivedData)) {
+      stats.packetsValid++;
+      digitalWrite(LED_VALID, HIGH);
+      printReceivedData();
+      delay(10);  // Small delay for display
+      digitalWrite(LED_VALID, LOW);
+    } else {
+      stats.packetsInvalid++;
+      Serial.println(F("⚠️  Checksum error - data corrupted"));
+    }
+    
+    digitalWrite(LED_RX, LOW);
+  }
+  
+  // Calculate packet rate every 5 seconds
+  if (millis() - lastStatsTime >= 5000) {
+    unsigned long packetsSinceLast = stats.packetsReceived - packetsAtLastStats;
+    stats.packetRate = packetsSinceLast / 5.0;
+    packetsAtLastStats = stats.packetsReceived;
+    lastStatsTime = millis();
+    
+    printStats();
+  }
+  
+  // Check for signal loss (no data for 2 seconds)
+  if (millis() - stats.lastPacketTime > 2000 && stats.lastPacketTime != 0) {
+    Serial.println(F("⚠️  SIGNAL LOST - No data for 2 seconds"));
+    stats.lastPacketTime = millis();  // Reset to avoid repeated messages
+  }
+}
+
+// ==================== INITIALIZATION ====================
+
+bool initNRF24Receiver() {
+  if (!radio.begin()) {
+    return false;
+  }
+  
+  // Configure NRF24L01 - must match transmitter
+  radio.setChannel(100);
+  radio.setDataRate(RF24_250KBPS);
+  radio.setPALevel(RF24_PA_HIGH);
+  radio.setPayloadSize(sizeof(receivedData));
+  radio.setAutoAck(true);
+  
+  // Open pipe for reading
+  radio.openReadingPipe(1, pipeIn);
+  radio.startListening();  // Set as receiver
+  
+  // Print configuration
+  if (Serial) {
+    Serial.println(F("NRF24 Receiver Configuration:"));
+    radio.printDetails();
+  }
+  
+  return true;
+}
+
+// ==================== DATA PROCESSING ====================
+
+void printReceivedData() {
+  // Convert scaled values back to actual values
+  float temp = receivedData.temperature / 100.0;
+  float pres = receivedData.pressure / 10.0;
+  float alt = receivedData.altitude / 10.0;
+  float accX = receivedData.accel[0] / 1000.0;
+  float accY = receivedData.accel[1] / 1000.0;
+  float accZ = receivedData.accel[2] / 1000.0;
+  float gyroX = receivedData.gyro[0] / 100.0;
+  float gyroY = receivedData.gyro[1] / 100.0;
+  float gyroZ = receivedData.gyro[2] / 100.0;
+  
+  // Format: Time(ms) Temp(°C) Press(hPa) Alt(m) AccX AccY AccZ GyroX GyroY GyroZ
+  Serial.print(receivedData.timestamp);
+  Serial.print("  ");
+  Serial.print(temp, 2);
+  Serial.print("  ");
+  Serial.print(pres, 1);
+  Serial.print("  ");
+  Serial.print(alt, 1);
+  Serial.print("  ");
+  Serial.print(accX, 2);
+  Serial.print(" ");
+  Serial.print(accY, 2);
+  Serial.print(" ");
+  Serial.print(accZ, 2);
+  Serial.print("  ");
+  Serial.print(gyroX, 1);
+  Serial.print(" ");
+  Serial.print(gyroY, 1);
+  Serial.print(" ");
+  Serial.println(gyroZ, 1);
+}
+
+void printStats() {
+  Serial.println(F("\n--- STATISTICS ---"));
+  Serial.print(F("Packets Received: ")); Serial.println(stats.packetsReceived);
+  Serial.print(F("Valid Packets: ")); Serial.println(stats.packetsValid);
+  Serial.print(F("Invalid Packets: ")); Serial.println(stats.packetsInvalid);
+  Serial.print(F("Packet Rate: ")); Serial.print(stats.packetRate, 1);
+  Serial.println(F(" Hz"));
+  
+  float validity = (stats.packetsReceived > 0) ? 
+                   (100.0 * stats.packetsValid / stats.packetsReceived) : 0;
+  Serial.print(F("Data Validity: ")); Serial.print(validity, 1);
+  Serial.println(F("%"));
+  Serial.println(F("------------------\n"));
+}
+
+// ==================== UTILITY FUNCTIONS ====================
+
+uint8_t calculateChecksum(PackedSensorData* d) {
+  uint8_t sum = 0;
+  uint8_t* bytes = (uint8_t*)d;
+  
+  for (size_t i = 0; i < sizeof(PackedSensorData) - 1; i++) {
+    sum ^= bytes[i];
+  }
+  return sum;
+}
+
+bool verifyChecksum(PackedSensorData* d) {
+  uint8_t calculated = calculateChecksum(d);
+  return (calculated == d->checksum);
+}

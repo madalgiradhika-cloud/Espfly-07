@@ -1,0 +1,60 @@
+/**
+ * ULTRA-SHORT NRF24L01 TEST
+ * Run on both ESP32s to test communication
+ * 
+ * MODE SELECTION:
+ * - Comment/uncomment #define TX_MODE
+ */
+
+//#define TX_MODE  // Uncomment for transmitter, comment for receiver
+
+#include <SPI.h>
+#include <RF24.h>
+
+#define CE_PIN    4
+#define CSN_PIN   5
+
+RF24 radio(CE_PIN, CSN_PIN);
+const uint64_t address = 0xE8E8F0F0E1LL;
+
+#ifdef TX_MODE
+  // ===== TRANSMITTER =====
+  void setup() {
+    Serial.begin(115200);
+    radio.begin();
+    radio.setChannel(100);
+    radio.openWritingPipe(address);
+    radio.stopListening();
+    Serial.println("TX Mode - Sending...");
+  }
+  
+  void loop() {
+    unsigned long time = millis();
+    bool result = radio.write(&time, sizeof(time));
+    Serial.print("Sent: "); Serial.print(time);
+    Serial.println(result ? " ✓" : " ✗");
+    delay(100);
+  }
+
+#else
+  // ===== RECEIVER =====
+  void setup() {
+    Serial.begin(115200);
+    radio.begin();
+    radio.setChannel(100);
+    radio.openReadingPipe(1, address);
+    radio.startListening();
+    Serial.println("RX Mode - Waiting...");
+  }
+  
+  void loop() {
+    if(radio.available()) {
+      unsigned long time;
+      radio.read(&time, sizeof(time));
+      unsigned long now = millis();
+      Serial.print("Received: "); Serial.print(time);
+      Serial.print(" | Delay: "); Serial.print(now - time);
+      Serial.println(" ms");
+    }
+  }
+#endif

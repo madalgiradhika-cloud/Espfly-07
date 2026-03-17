@@ -1,0 +1,108 @@
+/**
+ * NRF24L01 TRANSMITTER CALIBRATION
+ * Tests joysticks and sends data to receiver
+ * Upload to your transmitter ESP32
+ */
+
+#include <SPI.h>
+#include <RF24.h>
+#include <ESP32Servo.h>
+
+// NRF24L01 pins
+#define CE_PIN    4
+#define CSN_PIN   5
+
+// Joystick pins
+#define THROTTLE  34
+#define ROLL      35
+#define PITCH     32
+#define YAW       33
+
+// Switch pins
+#define ARM_SW    25
+#define MODE_SW   26
+
+RF24 radio(CE_PIN, CSN_PIN);
+const uint64_t pipeOut = 0xE8E8F0F0E1LL;
+
+struct RadioData {
+  uint16_t throttle;
+  int16_t roll;
+  int16_t pitch;
+  int16_t yaw;
+  uint8_t switches;
+  uint16_t checksum;
+};
+
+RadioData data;
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("\n📻 TX CALIBRATION v1.0");
+  Serial.println("======================");
+  
+  // Initialize radio
+  if (!radio.begin()) {
+    Serial.println("❌ Radio failed!");
+    while(1);
+  }
+  
+  radio.setChannel(100);
+  radio.setDataRate(RF24_250KBPS);
+  radio.setPALevel(RF24_PA_HIGH);
+  radio.openWritingPipe(pipeOut);
+  radio.stopListening();
+  
+  Serial.println("✅ Radio OK");
+  Serial.println("\nMove all sticks to extremes");
+  Serial.println("Press any key when ready...");
+  
+  while(!Serial.available()) delay(100);
+  Serial.read();
+}
+
+void loop() {
+  // Read joysticks (0-4095)
+  int throRaw = analogRead(THROTTLE);
+  int rollRaw = analogRead(ROLL);
+  int pitchRaw = analogRead(PITCH);
+  int yawRaw = analogRead(YAW);
+  
+  // Map to output ranges
+  data.throttle = map(throRaw, 0, 4095, 0, 1000);
+  data.roll = map(rollRaw, 0, 4095, -500, 500);
+  data.pitch = map(pitchRaw, 0, 4095, -500, 500);
+  data.yaw = map(yawRaw, 0, 4095, -500, 500);
+  
+  // Read switches
+  data.switches = 0;
+  if(digitalRead(ARM_SW) == LOW) data.switches |= 0x01;
+  if(digitalRead(MODE_SW) == LOW) data.switches |= 0x02;
+  
+  // Simple checksum
+  data.checksum = data.throttle ^ data.roll ^ data.pitch ^ data.yaw ^ data.switches;
+  
+  // Send data
+  bool result = radio.write(&data, sizeof(data));
+  
+  // Display readings
+  Serial.print("\rT:");
+  Serial.print(data.throttle);
+  Serial.print(" R:");
+  Serial.print(data.roll);
+  Serial.print(" P:");
+  Serial.print(data.pitch);
+  Serial.print(" Y:");
+  Serial.print(data.yaw);
+  Serial.print(" SW:");
+  Serial.print(data.switches, BIN);
+  Serial.print(" TX:");
+  Serial.print(result ? "✅" : "❌");
+  
+  // Show joystick centers
+  if(abs(data.roll) < 10 && abs(data.pitch) < 10 && abs(data.yaw) < 10) {
+    Serial.print(" [CENTER]");
+  }
+  
+  delay(50); // 20Hz update
+}

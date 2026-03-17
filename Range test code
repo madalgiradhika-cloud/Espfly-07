@@ -1,0 +1,88 @@
+/**
+ * NRF24L01 RANGE TESTER
+ * Measures signal strength and packet loss
+ */
+
+#include <SPI.h>
+#include <RF24.h>
+
+#define CE_PIN    4
+#define CSN_PIN   5
+
+RF24 radio(CE_PIN, CSN_PIN);
+const uint64_t pipe = 0xE8E8F0F0E1LL;
+
+// Statistics
+unsigned long packetsSent = 0;
+unsigned long packetsReceived = 0;
+unsigned long startTime = 0;
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("\n📶 NRF24L01 RANGE TEST");
+  Serial.println("======================");
+  
+  radio.begin();
+  radio.setChannel(100);
+  radio.setDataRate(RF24_250KBPS);
+  radio.setPALevel(RF24_PA_MAX);
+  radio.setPayloadSize(32);
+  radio.setAutoAck(true);
+  radio.setRetries(5, 15);
+  
+  Serial.println("1. Place transmitter at fixed position");
+  Serial.println("2. Move receiver to test location");
+  Serial.println("3. Press any key to start...");
+  while(!Serial.available()) delay(100);
+  Serial.read();
+  
+  Serial.println("\nTesting... Walk away from transmitter");
+  Serial.println("=====================================");
+  
+  radio.openWritingPipe(pipe);
+  radio.stopListening();
+  startTime = millis();
+}
+
+void loop() {
+  // Send test packet
+  unsigned long data = millis();
+  bool success = radio.write(&data, sizeof(data));
+  
+  if(success) {
+    packetsSent++;
+    
+    // Wait for acknowledgment (contains RSSI)
+    if(radio.available()) {
+      unsigned long rssi;
+      radio.read(&rssi, sizeof(rssi));
+      packetsReceived++;
+    }
+  }
+  
+  // Print stats every second
+  static unsigned long lastPrint = 0;
+  if(millis() - lastPrint > 1000) {
+    float loss = 100.0 - (100.0 * packetsReceived / packetsSent);
+    float time = (millis() - startTime) / 1000.0;
+    float rate = packetsSent / time;
+    
+    Serial.print("\r📤 ");
+    Serial.print(packetsSent);
+    Serial.print(" | 📥 ");
+    Serial.print(packetsReceived);
+    Serial.print(" | 📉 Loss: ");
+    Serial.print(loss, 1);
+    Serial.print("% | ⚡ Rate: ");
+    Serial.print(rate, 1);
+    Serial.print(" Hz");
+    
+    if(loss > 50) Serial.print(" ⚠️  WEAK SIGNAL");
+    else if(loss > 20) Serial.print(" 📶 OK");
+    else if(loss < 5) Serial.print(" 💪 STRONG");
+    
+    lastPrint = millis();
+  }
+  
+  delay(10);
+}

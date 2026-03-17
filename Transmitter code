@@ -1,0 +1,298 @@
+/**
+ * ESP32 + MPU6050 + BMP280 + NRF24L01 Transmitter
+ * Full advanced code with error handling and data validation
+ */
+
+#include <SPI.h>
+#include <RF24.h>
+#include <Wire.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_BMP280.h>
+#include <Adafruit_Sensor.h>
+
+// ==================== PIN DEFINITIONS ====================
+// NRF24L01 pins
+#define NRF_CE_PIN    4
+#define NRF_CSN_PIN   5
+
+// I2C pins for sensors (ESP32 default I2C)
+#define I2C_SDA       21
+#define I2C_SCL       22
+
+// LED indicators
+#define LED_STATUS    2     // Built-in LED or external
+#define LED_ERROR     15    // Error indicator LED
+
+// ==================== RF CONFIGURATION ====================
+RF24 radio(NRF_CE_PIN, NRF_CSN_PIN);
+const byte address[6] = "SENS1";  // Unique pipe address
+const uint64_t pipeOut = 0xE8E8F0F0E1LL;  // Alternative addressing
+
+// ==================== SENSOR OBJECTS ====================
+Adafruit_MPU6050 mpu;
+Adafruit_BMP280 bmp;
+
+// ==================== DATA STRUCTURE ====================
+// IMPORTANT: Keep total size under 32 bytes (NRF24L01 limit)
+// Using fixed-width types for cross-platform compatibility
+struct SensorData {
+  uint32_t timestamp;      // 4 bytes - millis() counter
+  float temperature;       // 4 bytes - BMP280 temperature
+  float pressure;          // 4 bytes - BMP280 pressure
+  float altitude;          // 4 bytes - Calculated altitude
+  float accel_x;           // 4 bytes - MPU6050 acceleration X
+  float accel_y;           // 4 bytes - MPU6050 acceleration Y
+  float accel_z;           // 4 bytes - MPU6050 acceleration Z
+  float gyro_x;            // 4 bytes - MPU6050 gyroscope X
+  float gyro_y;            // 4 bytes - MPU6050 gyroscope Y
+  float gyro_z;            // 4 bytes - MPU6050 gyroscope Z
+  uint8_t checksum;        // 1 byte - Simple validation
+};  // Total: 41 bytes? Let's calculate properly
+
+// Better packed structure to ensure 32-byte limit
+struct PackedSensorData {
+  uint32_t timestamp;      // 4
+  int16_t temperature;     // 2 (scaled *100)
+  uint16_t pressure;       // 2 (scaled hPa)
+  int16_t altitude;        // 2 (scaled *10)
+  int16_t accel[3];        // 6 (scaled *1000)
+  int16_t gyro[3];         // 6 (scaled *100)
+  uint8_t checksum;        // 1
+};  // Total: 23 bytes - Safe!
+
+PackedSensorData data;
+PackedSensorData dataReceived;  // For verification if needed
+
+// ==================== FUNCTION PROTOTYPES ====================
+bool initMPU6050();
+bool initBMP280();
+bool initNRF24();
+void readSensors();
+void printSensorData();
+uint8_t calculateChecksum(PackedSensorData* d);
+bool verifyChecksum(PackedSensorData* d);
+void indicateError(int blinkCount);
+void indicateSuccess();
+
+// ==================== SETUP ====================
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+  Serial.println(F("\n\n=== ESP32 SENSOR TRANSMITTER INITIALIZING ==="));
+  
+  // Initialize LED pins
+  pinMode(LED_STATUS, OUTPUT);
+  pinMode(LED_ERROR, OUTPUT);
+  digitalWrite(LED_STATUS, LOW);
+  digitalWrite(LED_ERROR, LOW);
+  
+  // Initialize I2C for sensors
+  Wire.begin(I2C_SDA, I2C_SCL);
+  
+  // Initialize all components
+  bool allOK = true;
+  
+  if (!initMPU6050()) {
+    Serial.println(F("❌ MPU6050 initialization FAILED"));
+    allOK = false;
+  } else {
+    Serial.println(F("✅ MPU6050 initialized"));
+  }
+  
+  if (!initBMP280()) {
+    Serial.println(F("❌ BMP280 initialization FAILED"));
+    allOK = false;
+  } else {
+    Serial.println(F("✅ BMP280 initialized"));
+  }
+  
+  if (!initNRF24()) {
+    Serial.println(F("❌ NRF24L01 initialization FAILED"));
+    allOK = false;
+  } else {
+    Serial.println(F("✅ NRF24L01 initialized"));
+  }
+  
+  if (!allOK) {
+    Serial.println(F("⚠️  Some components failed! Check wiring."));
+    while (1) {
+      indicateError(5);  // Fast blink error
+    }
+  }
+  
+  Serial.println(F("✅ ALL SYSTEMS GO - Starting transmission"));
+  Serial.println(F("===========================================\n"));
+  delay(1000);
+}
+
+// ==================== MAIN LOOP ====================
+void loop() {
+  static unsigned long lastTxTime = 0;
+  const unsigned long txInterval = 100;  // Transmit every 100ms (10Hz)
+  
+  // Update timestamp
+  data.timestamp = millis();
+  
+  // Read all sensors
+  readSensors();
+  
+  // Calculate checksum before sending
+  data.checksum = calculateChecksum(&data);
+  
+  // Send data
+  unsigned long now = millis();
+  if (now - lastTxTime >= txInterval) {
+    digitalWrite(LED_STATUS, HIGH);  // TX indicator
+    
+    bool report = radio.write(&data, sizeof(data));
+    
+    if (report) {
+      Serial.print(F("✓ TX Success @ "));
+      Serial.println(now);
+      printSensorData();
+      digitalWrite(LED_STATUS, LOW);  // Turn off after successful TX
+    } else {
+      Serial.println(F("✗ TX Failed"));
+      indicateError(2);
+    }
+    
+    lastTxTime = now;
+  }
+  
+  // Small delay to prevent overwhelming the system
+  delay(10);
+}
+
+// ==================== INITIALIZATION FUNCTIONS ====================
+
+bool initMPU6050() {
+  if (!mpu.begin()) {
+    return false;
+  }
+  
+  // Configure MPU6050 for optimal performance
+  mpu.setAccelerometerRange(MPU6050_RANGE_8_G);     // +/- 8G
+  mpu.setGyroRange(MPU6050_RANGE_500_DEG);          // +/- 500 deg/s
+  mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);       // 21Hz filter
+  
+  return true;
+}
+
+bool initBMP280() {
+  // Try both common I2C addresses
+  if (!bmp.begin(0x76)) {
+    if (!bmp.begin(0x77)) {
+      return false;
+    }
+  }
+  
+  // Configure BMP280 for best performance
+  bmp.setSampling(Adafruit_BMP280::MODE_NORMAL,      // Operating Mode
+                  Adafruit_BMP280::SAMPLING_X2,      // Temp oversampling
+                  Adafruit_BMP280::SAMPLING_X16,     // Pressure oversampling
+                  Adafruit_BMP280::FILTER_X16,       // Filtering
+                  Adafruit_BMP280::STANDBY_MS_500);  // Standby time
+  
+  return true;
+}
+
+bool initNRF24() {
+  if (!radio.begin()) {
+    return false;
+  }
+  
+  // Configure NRF24L01 for reliable communication
+  radio.setChannel(100);                 // Use channel 100 (2.5GHz)
+  radio.setDataRate(RF24_250KBPS);       // Lower data rate = better range
+  radio.setPALevel(RF24_PA_HIGH);        // Maximum power for better range
+  radio.setPayloadSize(sizeof(data));    // Fixed payload size
+  radio.setAutoAck(true);                 // Enable auto-acknowledgment
+  radio.setRetries(5, 15);                // 5ms delay, 15 retries
+  
+  // Open pipe for writing
+  radio.openWritingPipe(pipeOut);
+  radio.stopListening();                   // Set as transmitter
+  
+  // Print radio details for debugging
+  if (Serial) {
+    Serial.println(F("NRF24 Configuration:"));
+    radio.printDetails();
+  }
+  
+  return true;
+}
+
+// ==================== SENSOR READING FUNCTIONS ====================
+
+void readSensors() {
+  static float seaLevelPressure = 1013.25;  // Standard pressure at sea level
+  
+  // Read BMP280 sensors
+  float temp = bmp.readTemperature();
+  float pres = bmp.readPressure() / 100.0F;  // Convert to hPa
+  float alt = bmp.readAltitude(seaLevelPressure);
+  
+  // Scale and store BMP280 data
+  data.temperature = (int16_t)(temp * 100);     // Store as °C * 100
+  data.pressure = (uint16_t)(pres * 10);        // Store as hPa * 10
+  data.altitude = (int16_t)(alt * 10);          // Store as meters * 10
+  
+  // Read MPU6050
+  sensors_event_t a, g, tempEvent;
+  mpu.getEvent(&a, &g, &tempEvent);
+  
+  // Scale and store MPU6050 data
+  // Acceleration: m/s² * 1000 to preserve precision
+  data.accel[0] = (int16_t)(a.acceleration.x * 1000);
+  data.accel[1] = (int16_t)(a.acceleration.y * 1000);
+  data.accel[2] = (int16_t)(a.acceleration.z * 1000);
+  
+  // Gyroscope: rad/s * 100 to preserve precision
+  data.gyro[0] = (int16_t)(g.gyro.x * 100);
+  data.gyro[1] = (int16_t)(g.gyro.y * 100);
+  data.gyro[2] = (int16_t)(g.gyro.z * 100);
+}
+
+void printSensorData() {
+  Serial.print(F("Time: ")); Serial.print(data.timestamp);
+  Serial.print(F(" | T: ")); Serial.print(data.temperature / 100.0, 2);
+  Serial.print(F("°C | P: ")); Serial.print(data.pressure / 10.0, 1);
+  Serial.print(F("hPa | Alt: ")); Serial.print(data.altitude / 10.0, 1);
+  Serial.print(F("m | Acc: ")); Serial.print(data.accel[0] / 1000.0, 2);
+  Serial.print(F(",")); Serial.print(data.accel[1] / 1000.0, 2);
+  Serial.print(F(",")); Serial.print(data.accel[2] / 1000.0, 2);
+  Serial.println();
+}
+
+// ==================== UTILITY FUNCTIONS ====================
+
+uint8_t calculateChecksum(PackedSensorData* d) {
+  uint8_t sum = 0;
+  uint8_t* bytes = (uint8_t*)d;
+  
+  // XOR all bytes except the checksum itself
+  for (size_t i = 0; i < sizeof(PackedSensorData) - 1; i++) {
+    sum ^= bytes[i];
+  }
+  return sum;
+}
+
+bool verifyChecksum(PackedSensorData* d) {
+  uint8_t calculated = calculateChecksum(d);
+  return (calculated == d->checksum);
+}
+
+void indicateError(int blinkCount) {
+  for (int i = 0; i < blinkCount; i++) {
+    digitalWrite(LED_ERROR, HIGH);
+    delay(100);
+    digitalWrite(LED_ERROR, LOW);
+    delay(100);
+  }
+}
+
+void indicateSuccess() {
+  digitalWrite(LED_STATUS, HIGH);
+  delay(50);
+  digitalWrite(LED_STATUS, LOW);
+}
